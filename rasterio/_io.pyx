@@ -45,6 +45,7 @@ from rasterio._path import _parse_path, _UnparsedPath
 from rasterio.vrt import _boundless_vrt_doc
 from rasterio.windows import Window, intersection
 
+from libc.math cimport fabs, floor
 from libc.stdio cimport FILE
 
 from rasterio.enums import Resampling
@@ -64,6 +65,30 @@ def validate_resampling(resampling):
     """Validate that the resampling method is compatible of reads/writes."""
     if resampling != Resampling.rms and resampling > 7:
         raise ResamplingAlgorithmError("{!r} can be used for warp operations but not for reads and writes".format(Resampling(resampling)))
+
+
+cdef void set_window(double x0, double y0, double width, double height, int min_size,
+                     int *xoff, int *yoff, int *xsize, int *ysize,
+                     GDALRasterIOExtraArg *extras):
+    """Round a window to whole pixels, as GDAL's Python bindings do.
+
+    The floating-point window is only passed to GDAL when it differs from the
+    rounded one. Some GDAL code paths (multi-threaded GeoTIFF reads, the MEM
+    and warped VRT drivers) use only the integer window, so a truncated offset
+    such as 799 for 799.9999999999972 would shift their result by a pixel.
+    """
+    xoff[0] = <int>floor(x0 + 0.5)
+    yoff[0] = <int>floor(y0 + 0.5)
+    xsize[0] = max(min_size, <int>floor(width + 0.5))
+    ysize[0] = max(min_size, <int>floor(height + 0.5))
+    extras.bFloatingPointWindowValidity = (
+        fabs(x0 - xoff[0]) > 1e-8 or fabs(y0 - yoff[0]) > 1e-8
+        or fabs(width - xsize[0]) > 1e-8 or fabs(height - ysize[0]) > 1e-8
+    )
+    extras.dfXOff = x0
+    extras.dfYOff = y0
+    extras.dfXSize = width
+    extras.dfYSize = height
 
 
 cdef int io_band(GDALRasterBandH band, int mode, double x0, double y0,
@@ -90,21 +115,14 @@ cdef int io_band(GDALRasterBandH band, int mode, double x0, double y0,
     cdef GSpacing bufpixelspace = data.strides[1]
     cdef GSpacing buflinespace = data.strides[0]
 
-    cdef int xoff = <int>x0
-    cdef int yoff = <int>y0
-    cdef int xsize = <int>width
-    cdef int ysize = <int>height
+    cdef int xoff, yoff, xsize, ysize
     cdef int retval = 3
 
     cdef StackChecker checker
     cdef GDALRasterIOExtraArg extras
     extras.nVersion = 1
     extras.eResampleAlg = <GDALRIOResampleAlg>resampling
-    extras.bFloatingPointWindowValidity = 1
-    extras.dfXOff = x0
-    extras.dfYOff = y0
-    extras.dfXSize = width
-    extras.dfYSize = height
+    set_window(x0, y0, width, height, 0, &xoff, &yoff, &xsize, &ysize, &extras)
     extras.pfnProgress = NULL
     extras.pProgressData = NULL
 
@@ -145,19 +163,12 @@ cdef int io_multi_band(GDALDatasetH hds, int mode, double x0, double y0,
     cdef GSpacing bufbandspace = data.strides[0]
     cdef int count = len(indexes)
 
-    cdef int xoff = <int>x0
-    cdef int yoff = <int>y0
-    cdef int xsize = <int>max(1, width)
-    cdef int ysize = <int>max(1, height)
+    cdef int xoff, yoff, xsize, ysize
 
     cdef GDALRasterIOExtraArg extras
     extras.nVersion = 1
     extras.eResampleAlg = <GDALRIOResampleAlg>resampling
-    extras.bFloatingPointWindowValidity = 1
-    extras.dfXOff = x0
-    extras.dfYOff = y0
-    extras.dfXSize = width
-    extras.dfYSize = height
+    set_window(x0, y0, width, height, 1, &xoff, &yoff, &xsize, &ysize, &extras)
     extras.pfnProgress = NULL
     extras.pProgressData = NULL
 
@@ -210,20 +221,13 @@ cdef int io_multi_mask(GDALDatasetH hds, int mode, double x0, double y0,
     cdef GSpacing buflinespace = data.strides[1]
     cdef int count = len(indexes)
 
-    cdef int xoff = <int>x0
-    cdef int yoff = <int>y0
-    cdef int xsize = <int>max(1, width)
-    cdef int ysize = <int>max(1, height)
+    cdef int xoff, yoff, xsize, ysize
 
     cdef StackChecker checker
     cdef GDALRasterIOExtraArg extras
     extras.nVersion = 1
     extras.eResampleAlg = <GDALRIOResampleAlg>resampling
-    extras.bFloatingPointWindowValidity = 1
-    extras.dfXOff = x0
-    extras.dfYOff = y0
-    extras.dfXSize = width
-    extras.dfYSize = height
+    set_window(x0, y0, width, height, 1, &xoff, &yoff, &xsize, &ysize, &extras)
     extras.pfnProgress = NULL
     extras.pProgressData = NULL
 
